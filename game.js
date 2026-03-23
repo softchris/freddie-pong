@@ -655,6 +655,7 @@
   canvas.addEventListener('touchstart', handleTapStart, { passive: false });
   overlay.addEventListener('touchstart', handleTapStart, { passive: false });
   gameOverEl.addEventListener('touchstart', handleTapStart, { passive: false });
+  canvas.addEventListener('click', handleTapStart);
   overlay.addEventListener('click', handleTapStart);
   gameOverEl.addEventListener('click', handleTapStart);
 
