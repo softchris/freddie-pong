@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GitHub Pong 3D</title>
+  <title>Freddie Pong</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -22,40 +22,6 @@
       height: 100vh;
     }
 
-    /* ---- Webcam feed ---- */
-    #webcamContainer {
-      position: fixed;
-      bottom: 16px;
-      right: 16px;
-      width: 220px;
-      height: 165px;
-      border-radius: 12px;
-      overflow: hidden;
-      border: 2px solid #30363d;
-      background: #161b22;
-      z-index: 10;
-      box-shadow: 0 4px 24px rgba(0,0,0,.5);
-    }
-    #webcamContainer.tracking {
-      border-color: #3fb950;
-      box-shadow: 0 0 12px rgba(63,185,80,.3);
-    }
-    #webcam {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      transform: scaleX(-1);
-    }
-    #webcamLabel {
-      position: absolute;
-      bottom: 4px;
-      left: 0;
-      width: 100%;
-      text-align: center;
-      font-size: 10px;
-      color: #8b949e;
-    }
-    #webcamLabel.tracking { color: #3fb950; }
 
     /* ---- HUD ---- */
     #hud {
@@ -93,7 +59,6 @@
       pointer-events: none;
       z-index: 10;
     }
-    #modeIndicator.two-player { color: #3fb950; }
 
     /* ---- Start overlay ---- */
     #overlay {
@@ -165,6 +130,93 @@
       50% { opacity: 1; }
     }
 
+    /* ---- Calibration ---- */
+    #calibrationOverlay {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 25;
+      background: rgba(13,17,23,.85);
+      backdrop-filter: blur(8px);
+      transition: opacity .4s;
+    }
+    #calibrationOverlay.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #calibTitle {
+      font-size: 36px;
+      font-weight: 800;
+      margin-bottom: 8px;
+      background: linear-gradient(135deg, #f0c040, #d4a017);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    #calibSubtitle {
+      font-size: 16px;
+      color: #8b949e;
+      margin-bottom: 28px;
+    }
+    #calibStep {
+      font-size: 52px;
+      font-weight: 900;
+      margin-bottom: 12px;
+      min-height: 70px;
+    }
+    #calibStep.ay { color: #3fb950; }
+    #calibStep.eh { color: #f85149; }
+    #calibStep.done { color: #f0c040; }
+    #calibStatus {
+      font-size: 18px;
+      color: #e6edf3;
+      margin-bottom: 16px;
+      min-height: 28px;
+    }
+    #calibMeter {
+      width: 300px;
+      height: 8px;
+      border-radius: 4px;
+      background: #21262d;
+      overflow: hidden;
+      margin-bottom: 16px;
+    }
+    #calibMeterFill {
+      height: 100%;
+      width: 0%;
+      border-radius: 4px;
+      background: #d4a017;
+      transition: width 0.05s linear;
+    }
+    #calibMeterFill.recording { background: #3fb950; }
+    #calibHint {
+      font-size: 14px;
+      color: #484f58;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    #calibMicRow {
+      font-size: 14px;
+      color: #8b949e;
+      margin-bottom: 20px;
+    }
+    #calibMicRow select {
+      padding: 6px 10px;
+      font-size: 13px;
+      color: #e6edf3;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      outline: none;
+      cursor: pointer;
+      margin-left: 8px;
+      max-width: 300px;
+    }
+    #calibMicRow select:focus { border-color: #d4a017; }
+
     /* ---- Game Over ---- */
     #gameOver {
       position: fixed;
@@ -216,26 +268,98 @@
       100% { transform: scale(1); }
     }
 
-    /* ---- Loading ---- */
-    #loading {
+
+    /* ---- Voice indicator (Freddie mode 🎤) ---- */
+    #voiceIndicator {
       position: fixed;
       bottom: 16px;
       left: 16px;
-      font-size: 13px;
-      color: #484f58;
+      font-size: 14px;
+      color: #8b949e;
       z-index: 10;
+      padding: 8px 14px;
+      border-radius: 10px;
+      border: 1px solid #30363d;
+      background: rgba(22, 27, 34, 0.85);
+      transition: all 0.3s ease;
+      font-weight: 500;
+      min-width: 220px;
     }
-    #loading.hidden { display: none; }
+    #voiceIndicator.active {
+      border-color: #d4a017;
+      color: #f0c040;
+    }
+    #voiceIndicator.voice-up {
+      border-color: #3fb950;
+      color: #3fb950;
+      box-shadow: 0 0 12px rgba(63, 185, 80, 0.4);
+      text-shadow: 0 0 8px rgba(63, 185, 80, 0.5);
+    }
+    #voiceIndicator.voice-down {
+      border-color: #da3633;
+      color: #f85149;
+      box-shadow: 0 0 12px rgba(248, 81, 73, 0.4);
+      text-shadow: 0 0 8px rgba(248, 81, 73, 0.5);
+    }
+    #micSelect {
+      display: block;
+      width: 100%;
+      margin-top: 6px;
+      padding: 4px 6px;
+      font-size: 11px;
+      color: #e6edf3;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      outline: none;
+      cursor: pointer;
+      pointer-events: auto;
+    }
+    #micSelect:focus { border-color: #d4a017; }
+    #voiceMeter {
+      height: 4px;
+      margin-top: 6px;
+      border-radius: 2px;
+      background: #21262d;
+      overflow: hidden;
+    }
+    #voiceMeterFill {
+      height: 100%;
+      width: 0%;
+      border-radius: 2px;
+      background: #d4a017;
+      transition: width 0.05s linear, background 0.15s;
+    }
+    #voiceMeterFill.loud { background: #3fb950; }
+
+    /* ---- Voice match flash ---- */
+    #voiceFlash {
+      position: fixed;
+      top: 50%;
+      left: 28px;
+      transform: translateY(-50%);
+      font-size: 48px;
+      font-weight: 900;
+      pointer-events: none;
+      z-index: 15;
+      opacity: 0;
+      transition: opacity 0.15s ease-out;
+      text-shadow: 0 0 24px currentColor, 0 0 48px currentColor;
+      letter-spacing: 2px;
+    }
+    #voiceFlash.show-up {
+      opacity: 1;
+      color: #3fb950;
+    }
+    #voiceFlash.show-down {
+      opacity: 1;
+      color: #f85149;
+    }
   </style>
 </head>
 <body>
 
   <canvas id="gameCanvas"></canvas>
-
-  <div id="webcamContainer">
-    <video id="webcam" autoplay playsinline muted></video>
-    <div id="webcamLabel">Initializing camera…</div>
-  </div>
 
   <div id="hud">
     <div id="scoreDisplay">
@@ -244,14 +368,24 @@
       <span class="score-p2" id="p2Score">0</span>
     </div>
   </div>
-  <div id="modeIndicator">Waiting for camera…</div>
+  <div id="modeIndicator">Voice Control</div>
 
   <div id="overlay">
-    <div id="title">GitHub Pong</div>
-    <div id="subtitle">3D · Eyebrow-Tracked · Contribution Edition</div>
-    <div id="controlHint">📷 Raise your eyebrows to move your paddle up</div>
-    <div id="startHint">Tap or press <kbd>SPACE</kbd> to start</div>
-    <div id="cameraHint">2 faces = 2 players · 1 face = vs AI</div>
+    <div id="title">Freddie Pong</div>
+    <div id="subtitle">3D · Voice-Controlled · Ay‑OH! Edition 🎤</div>
+    <div id="controlHint">🎤 Sing high <b>Ay‑OH!</b> = UP · Sing low <b>Eh‑OH!</b> = DOWN</div>
+    <div id="startHint">Waiting for mic…</div>
+    <div id="cameraHint">Allow microphone access to play</div>
+  </div>
+
+  <div id="calibrationOverlay" class="hidden">
+    <div id="calibTitle">🎤 Voice Calibration</div>
+    <div id="calibSubtitle">Teach the game YOUR voice</div>
+    <div id="calibMicRow">Select mic: <select id="micSelect"><option>Loading devices…</option></select></div>
+    <div id="calibStep"></div>
+    <div id="calibStatus"></div>
+    <div id="calibMeter"><div id="calibMeterFill"></div></div>
+    <div id="calibHint"></div>
   </div>
 
   <div id="gameOver">
@@ -260,7 +394,8 @@
     <div id="restartHint">Tap or press <kbd>SPACE</kbd> to play again</div>
   </div>
 
-  <div id="loading">Loading face-tracking model…</div>
+  <div id="voiceIndicator">🎤 Initializing mic…<div id="voiceMeter"><div id="voiceMeterFill"></div></div></div>
+  <div id="voiceFlash"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 

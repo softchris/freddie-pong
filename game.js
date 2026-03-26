@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// GitHub Pong 3D — Eyebrow-Controlled 2-Player Pong
+// Freddie Pong — Voice-Controlled 3D Pong
 // ═══════════════════════════════════════════════════════════════
 
 (function () {
@@ -20,9 +20,9 @@
   // Ball (green contribution square)
   const BALL_SIZE = 0.45;
   const BALL_DEPTH = 0.22;
-  const BALL_SPEED_INITIAL = 9;
-  const BALL_SPEED_MAX = 18;
-  const BALL_SPEED_INCREMENT = 0.2;
+  const BALL_SPEED_INITIAL = 5;
+  const BALL_SPEED_MAX = 11;
+  const BALL_SPEED_INCREMENT = 0.15;
 
   // Scoring
   const WIN_SCORE = 5;
@@ -38,8 +38,6 @@
   // Camera
   const CAM_BASE = new THREE.Vector3(0, -2, 24);
   const CAM_LOOKAT = new THREE.Vector3(0, 0, 0);
-  const PARALLAX_X = 3.0;
-  const PARALLAX_Y = 2.0;
 
   // Particles
   const PARTICLE_COUNT = 24;
@@ -48,21 +46,12 @@
   const SPARKLE_LIFE = 0.5;
 
   // AI
-  const AI_SPEED = 7.5;
-  const AI_DEAD_ZONE = 0.4;
+  const AI_SPEED = 4.0;
+  const AI_DEAD_ZONE = 1.2;
 
-  // Eyebrow detection
-  const EYEBROW_ADAPT_RATE = 0.005;
-  const EYEBROW_RAISE_THRESHOLD = 0.012;
-  const CALIBRATION_FRAMES = 60;
-
-  // Face tracking landmarks
-  const LEFT_BROW = [105, 66, 107, 70, 63];
-  const RIGHT_BROW = [334, 296, 336, 300, 293];
-  const LEFT_EYE_TOP = 159;
-  const RIGHT_EYE_TOP = 386;
-  const FOREHEAD = 10;
-  const CHIN = 152;
+  // Voice control — Freddie mode 🎤
+  const VOICE_VOLUME_THRESHOLD = 0.003;
+  const CALIB_RECORD_FRAMES = 40; // ~1.3s of recording per sound
 
   // ─── State ───────────────────────────────────────────────────
   let gameState = 'WAITING'; // WAITING | PLAYING | SCORED | GAME_OVER
@@ -74,47 +63,38 @@
   let scorePauseTimer = 0;
   let serveDirection = 1;
 
-  // Face tracking state
-  let faceLandmarker = null;
-  let lastDetectTime = 0;
-  let numFacesDetected = 0;
-
-  // Eyebrow state per player
-  let p1EyebrowUp = false;
-  let p2EyebrowUp = false;
-  let p1EyebrowRatio = 0;
-  let p2EyebrowRatio = 0;
-  let p1Baseline = 0;
-  let p2Baseline = 0;
-  let p1CalibFrames = 0;
-  let p2CalibFrames = 0;
-  let p1BaselineSum = 0;
-  let p2BaselineSum = 0;
-
-  // Camera face tracking for parallax
-  let rawFaceX = 0;
-  let rawFaceY = 0;
-  let smoothFaceX = 0;
-  let smoothFaceY = 0;
-  const FACE_SMOOTH = 0.1;
-
-  // Keyboard fallback
+  // Keyboard
   let keysDown = {};
-  let useKeyboardFallback = false;
+
+  // Voice control state (Freddie mode 🎤)
+  let voiceControlActive = false;
+  let voiceAnalyser = null;
+  let voiceDataArray = null;
+  let voiceAudioContext = null;
+  let voiceSource = null;
+  let voiceStream = null;
+  let voiceFreqArray = null;
+  let voiceCommand = 'NONE'; // 'UP' | 'DOWN' | 'NONE'
+  let voiceVolume = 0;
+
+  // Calibration state
+  let ayFingerprint = null;  // Float32Array — average spectrum for "Ay-OH!"
+  let ehFingerprint = null;  // Float32Array — average spectrum for "Eh-OH!"
+  let calibState = 'IDLE';   // IDLE | RECORD_AY | RECORD_EH | DONE
+  let calibFrames = [];
+  let calibFrameCount = 0;
 
   // ─── DOM ─────────────────────────────────────────────────────
   const canvas = document.getElementById('gameCanvas');
-  const webcam = document.getElementById('webcam');
-  const webcamContainer = document.getElementById('webcamContainer');
-  const webcamLabel = document.getElementById('webcamLabel');
   const overlay = document.getElementById('overlay');
   const gameOverEl = document.getElementById('gameOver');
   const gameOverTitle = document.getElementById('gameOverTitle');
   const p1ScoreEl = document.getElementById('p1Score');
   const p2ScoreEl = document.getElementById('p2Score');
   const finalScoreEl = document.getElementById('finalScore');
-  const modeIndicator = document.getElementById('modeIndicator');
-  const loadingEl = document.getElementById('loading');
+  const voiceIndicator = document.getElementById('voiceIndicator');
+  const voiceFlash = document.getElementById('voiceFlash');
+  const micSelect = document.getElementById('micSelect');
 
   // ─── Three.js Setup ─────────────────────────────────────────
   const scene = new THREE.Scene();
@@ -165,6 +145,18 @@
   floor.position.set(0, 0, -0.5);
   floor.receiveShadow = true;
   scene.add(floor);
+
+  // Freddie Mercury background on the table
+  const freddieTexture = new THREE.TextureLoader().load('freddie.jpg');
+  const freddieMat = new THREE.MeshBasicMaterial({
+    map: freddieTexture,
+    transparent: true,
+    opacity: 0.18,
+  });
+  const freddieGeo = new THREE.PlaneGeometry(FIELD_W, FIELD_H);
+  const freddiePlane = new THREE.Mesh(freddieGeo, freddieMat);
+  freddiePlane.position.set(0, 0, -0.44);
+  scene.add(freddiePlane);
 
   // Grid on floor
   const gridHelper = new THREE.GridHelper(30, 30, 0x161b22, 0x161b22);
@@ -485,252 +477,351 @@
     }
   }
 
-  // ─── Face Tracking (MediaPipe FaceLandmarker) ──────────────
-  async function initFaceTracking() {
+  // ─── Voice Control (Freddie Mode 🎤) ──────────────────────
+  async function initVoiceControl() {
+    const setStatus = (msg) => {
+      // Update only the text node (first child), not the select/meter
+      const textNode = voiceIndicator.childNodes[0];
+      if (textNode.nodeType === Node.TEXT_NODE) {
+        textNode.textContent = msg;
+      }
+      console.log('[Voice]', msg);
+    };
+
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } },
+      // Request mic permission first (needed to enumerate devices with labels)
+      setStatus('🎤 Requesting mic… ');
+      const initialStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      initialStream.getTracks().forEach(t => t.stop());
+
+      // Enumerate audio input devices and populate dropdown
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter(d => d.kind === 'audioinput');
+      console.log('[Voice] Found audio inputs:', audioInputs.map(d => d.label));
+
+      micSelect.innerHTML = '';
+      audioInputs.forEach((d, i) => {
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.textContent = d.label || ('Microphone ' + (i + 1));
+        micSelect.appendChild(opt);
       });
-      webcam.srcObject = stream;
-      webcam.load();
-      await webcam.play();
 
-      webcamLabel.textContent = 'Loading model\u2026';
+      // Connect to the selected device
+      async function connectMic(deviceId) {
+        // Stop previous stream
+        if (voiceStream) {
+          voiceStream.getTracks().forEach(t => t.stop());
+        }
+        if (voiceSource) {
+          voiceSource.disconnect();
+        }
 
-      const vision = await import(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'
-      );
+        const constraints = { audio: deviceId ? { deviceId: { exact: deviceId } } : true };
+        voiceStream = await navigator.mediaDevices.getUserMedia(constraints);
+        const track = voiceStream.getAudioTracks()[0];
+        console.log('[Voice] Connected to:', track.label, '| enabled:', track.enabled, '| muted:', track.muted);
+        setStatus('🎤 Using: ' + track.label + ' ');
 
-      const filesetResolver = await vision.FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
-      );
+        if (!voiceAudioContext) {
+          voiceAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+          voiceAnalyser = voiceAudioContext.createAnalyser();
+          voiceAnalyser.fftSize = 4096;
+          voiceDataArray = new Float32Array(voiceAnalyser.fftSize);
+          voiceFreqArray = new Uint8Array(voiceAnalyser.frequencyBinCount);
+        }
 
-      let landmarker;
-      try {
-        landmarker = await vision.FaceLandmarker.createFromOptions(filesetResolver, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-            delegate: 'GPU',
-          },
-          runningMode: 'VIDEO',
-          numFaces: 2,
-          outputFaceBlendshapes: true,
-        });
-      } catch (gpuErr) {
-        console.warn('GPU delegate failed, falling back to CPU:', gpuErr);
-        landmarker = await vision.FaceLandmarker.createFromOptions(filesetResolver, {
-          baseOptions: {
-            modelAssetPath:
-              'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-          },
-          runningMode: 'VIDEO',
-          numFaces: 2,
-          outputFaceBlendshapes: true,
-        });
+        voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
+        voiceSource.connect(voiceAnalyser);
+        voiceControlActive = true;
+        voiceIndicator.classList.add('active');
+
+        // Always try to resume and always start the processing loop
+        try { await voiceAudioContext.resume(); } catch (_) {}
+        if (!_voiceLoopRunning) {
+          _voiceLoopRunning = true;
+          processVoice();
+        }
+
+        // Start calibration AFTER audio is running
+        const startHint = document.getElementById('startHint');
+        if (startHint) startHint.textContent = 'Calibrating voice…';
+        if (!ayFingerprint) {
+          setTimeout(() => startCalibration(), 500);
+        }
       }
-      faceLandmarker = landmarker;
 
-      webcamLabel.textContent = 'Face tracking active';
-      webcamLabel.classList.add('tracking');
-      webcamContainer.classList.add('tracking');
-      loadingEl.classList.add('hidden');
+      // Connect to default device
+      await connectMic(micSelect.value);
 
-      detectFaces();
+      // Switch device on dropdown change (also resumes AudioContext as user gesture)
+      micSelect.addEventListener('change', () => {
+        if (voiceAudioContext && voiceAudioContext.state !== 'running') {
+          voiceAudioContext.resume();
+        }
+        connectMic(micSelect.value);
+      });
+
+      // Handle suspended AudioContext on user gesture
+      if (voiceAudioContext && voiceAudioContext.state !== 'running') {
+        const onGesture = () => {
+          voiceAudioContext.resume().then(() => {
+            if (voiceAudioContext.state === 'running') {
+              console.log('[Voice] AudioContext resumed via gesture');
+              if (!_voiceLoopRunning) {
+                _voiceLoopRunning = true;
+                processVoice();
+              }
+              if (!ayFingerprint) {
+                setTimeout(() => startCalibration(), 300);
+              }
+              document.removeEventListener('click', onGesture, true);
+              document.removeEventListener('keydown', onGesture, true);
+            }
+          });
+        };
+        document.addEventListener('click', onGesture, true);
+        document.addEventListener('keydown', onGesture, true);
+      }
+
     } catch (err) {
-      console.warn('Face tracking not available, falling back to keyboard:', err);
-      webcamLabel.textContent = 'Camera unavailable \u2014 use keyboard';
-      loadingEl.textContent = 'Using keyboard control';
-      modeIndicator.textContent = 'Keyboard: W/S + \u2191/\u2193';
-      useKeyboardFallback = true;
-      setTimeout(() => loadingEl.classList.add('hidden'), 3000);
+      console.error('[Voice] init failed:', err);
+      const textNode = voiceIndicator.childNodes[0];
+      if (textNode.nodeType === Node.TEXT_NODE) {
+        textNode.textContent = '🎤 Mic error: ' + err.message + ' ';
+      }
     }
   }
 
-  function detectFaces() {
-    if (!faceLandmarker) return;
-    requestAnimationFrame(detectFaces);
+  let _voiceLoopRunning = false;
+  // ─── Calibration ────────────────────────────────────────────
+  const calibOverlay = document.getElementById('calibrationOverlay');
+  const calibStep = document.getElementById('calibStep');
+  const calibStatus = document.getElementById('calibStatus');
+  const calibMeterFill = document.getElementById('calibMeterFill');
+  const calibHint = document.getElementById('calibHint');
 
-    const now = performance.now();
-    if (now - lastDetectTime < 33) return;
-    lastDetectTime = now;
+  function startCalibration() {
+    calibOverlay.classList.remove('hidden');
+    overlay.classList.add('hidden');
+    calibStep.textContent = '🎤';
+    calibStep.className = '';
+    calibStatus.textContent = 'Choose your microphone, then click below';
+    calibHint.textContent = '▶ Click here to start voice training ▶';
+    calibHint.style.cursor = 'pointer';
+    calibHint.style.color = '#f0c040';
+    calibHint.style.fontSize = '18px';
 
-    try {
-      const result = faceLandmarker.detectForVideo(webcam, now);
+    const beginOnClick = async (e) => {
+      if (e.target.tagName === 'SELECT' || e.target.tagName === 'OPTION') return;
+      calibHint.removeEventListener('click', beginOnClick);
+      calibHint.style.cursor = '';
+      calibHint.style.color = '';
+      calibHint.style.fontSize = '';
 
-      if (result.faceLandmarks && result.faceLandmarks.length > 0) {
-        const faces = result.faceLandmarks;
-        const blendshapes = result.faceBlendshapes || [];
-        numFacesDetected = faces.length;
+      // Fresh audio setup with the selected device
+      const deviceId = micSelect.value;
+      try {
+        if (voiceStream) voiceStream.getTracks().forEach(t => t.stop());
+        if (voiceSource) voiceSource.disconnect();
+        if (voiceAudioContext) { try { voiceAudioContext.close(); } catch(_) {} }
 
-        // Sort faces by X position (in raw video coords)
-        // Higher X in raw = left in mirrored view = P1
-        const indexed = faces.map((lm, i) => ({
-          landmarks: lm,
-          blendshapes: blendshapes[i] || null,
-          centerX: lm[1].x, // nose bridge
-        }));
-        indexed.sort((a, b) => b.centerX - a.centerX); // descending X = P1 first
+        const constraints = deviceId
+          ? { audio: { deviceId: { exact: deviceId } } }
+          : { audio: true };
+        voiceStream = await navigator.mediaDevices.getUserMedia(constraints);
+        voiceAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        await voiceAudioContext.resume();
+        voiceAnalyser = voiceAudioContext.createAnalyser();
+        voiceAnalyser.fftSize = 4096;
+        voiceDataArray = new Float32Array(voiceAnalyser.fftSize);
+        voiceFreqArray = new Uint8Array(voiceAnalyser.frequencyBinCount);
+        voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
+        voiceSource.connect(voiceAnalyser);
+        voiceControlActive = true;
 
-        // Player 1 (left paddle)
-        const p1Face = indexed[0];
-        processEyebrows(p1Face, 1);
+        const track = voiceStream.getAudioTracks()[0];
+        console.log('[Voice] Fresh connect:', track.label, 'ctx:', voiceAudioContext.state);
 
-        // Use first face for camera parallax
-        const nose = p1Face.landmarks[1];
-        rawFaceX = -(nose.x - 0.5) * 2;
-        rawFaceY = -(nose.y - 0.5) * 2;
-
-        // Player 2 (right paddle)
-        if (indexed.length >= 2) {
-          const p2Face = indexed[1];
-          processEyebrows(p2Face, 2);
-          modeIndicator.textContent = '2 Players';
-          modeIndicator.classList.add('two-player');
-        } else {
-          // AI controls P2
-          p2EyebrowUp = false;
-          modeIndicator.textContent = '1 Player + AI';
-          modeIndicator.classList.remove('two-player');
-        }
-
-        if (!webcamContainer.classList.contains('tracking')) {
-          webcamContainer.classList.add('tracking');
-          webcamLabel.textContent = 'Face tracking active';
-          webcamLabel.classList.add('tracking');
-        }
-      } else {
-        numFacesDetected = 0;
-        p1EyebrowUp = false;
-        p2EyebrowUp = false;
-        webcamContainer.classList.remove('tracking');
-        webcamLabel.textContent = 'No face detected';
-        webcamLabel.classList.remove('tracking');
-        modeIndicator.textContent = 'No face detected';
-        modeIndicator.classList.remove('two-player');
+        _voiceLoopRunning = true;
+        processVoice();
+        beginRecording('AY');
+      } catch (err) {
+        calibStatus.textContent = 'Mic error: ' + err.message;
+        console.error('[Voice] fresh connect failed:', err);
       }
-    } catch (e) {
-      // Silently continue on detection errors
-    }
+    };
+    calibHint.addEventListener('click', beginOnClick);
   }
 
-  function processEyebrows(faceData, playerNum) {
-    const lm = faceData.landmarks;
-
-    // Try blendshapes first (more reliable)
-    if (faceData.blendshapes && faceData.blendshapes.categories) {
-      const cats = faceData.blendshapes.categories;
-      let browUp = 0;
-      let browCount = 0;
-      for (const cat of cats) {
-        if (cat.categoryName === 'browInnerUp' ||
-            cat.categoryName === 'browOuterUpLeft' ||
-            cat.categoryName === 'browOuterUpRight') {
-          browUp += cat.score;
-          browCount++;
-        }
-      }
-      if (browCount > 0) {
-        const avg = browUp / browCount;
-        if (playerNum === 1) {
-          p1EyebrowUp = avg > 0.3;
-        } else {
-          p2EyebrowUp = avg > 0.3;
-        }
-        return;
-      }
-    }
-
-    // Fallback: landmark-based detection
-    let browAvgY = 0;
-    const browLandmarks = [...LEFT_BROW, ...RIGHT_BROW];
-    for (const idx of browLandmarks) {
-      browAvgY += lm[idx].y;
-    }
-    browAvgY /= browLandmarks.length;
-
-    const eyeAvgY = (lm[LEFT_EYE_TOP].y + lm[RIGHT_EYE_TOP].y) / 2;
-    const faceHeight = lm[CHIN].y - lm[FOREHEAD].y;
-
-    if (faceHeight < 0.01) return;
-
-    const ratio = (eyeAvgY - browAvgY) / faceHeight;
-
-    if (playerNum === 1) {
-      p1EyebrowRatio = ratio;
-      if (p1CalibFrames < CALIBRATION_FRAMES) {
-        p1BaselineSum += ratio;
-        p1CalibFrames++;
-        p1Baseline = p1BaselineSum / p1CalibFrames;
-        p1EyebrowUp = false;
-      } else {
-        p1EyebrowUp = ratio > p1Baseline + EYEBROW_RAISE_THRESHOLD;
-        if (!p1EyebrowUp) {
-          p1Baseline += (ratio - p1Baseline) * EYEBROW_ADAPT_RATE;
-        }
-      }
+  function beginRecording(which) {
+    calibFrames = [];
+    calibFrameCount = 0;
+    if (which === 'AY') {
+      calibState = 'RECORD_AY';
+      calibStep.textContent = 'AY‑OH! ⬆';
+      calibStep.className = 'ay';
+      calibStatus.textContent = 'Sing your AY‑OH! now…';
+      calibHint.textContent = 'Hold the sound for ~2 seconds';
     } else {
-      p2EyebrowRatio = ratio;
-      if (p2CalibFrames < CALIBRATION_FRAMES) {
-        p2BaselineSum += ratio;
-        p2CalibFrames++;
-        p2Baseline = p2BaselineSum / p2CalibFrames;
-        p2EyebrowUp = false;
-      } else {
-        p2EyebrowUp = ratio > p2Baseline + EYEBROW_RAISE_THRESHOLD;
-        if (!p2EyebrowUp) {
-          p2Baseline += (ratio - p2Baseline) * EYEBROW_ADAPT_RATE;
-        }
-      }
+      calibState = 'RECORD_EH';
+      calibStep.textContent = 'EH‑OH! ⬇';
+      calibStep.className = 'eh';
+      calibStatus.textContent = 'Now sing your EH‑OH!…';
+      calibHint.textContent = 'Hold the sound for ~2 seconds';
     }
   }
 
-  // ─── Paddle Control ────────────────────────────────────────
+  function finishRecording(which) {
+    // Average all captured frames into a single fingerprint
+    const len = calibFrames[0].length;
+    const avg = new Float32Array(len);
+    for (const frame of calibFrames) {
+      for (let i = 0; i < len; i++) avg[i] += frame[i];
+    }
+    for (let i = 0; i < len; i++) avg[i] /= calibFrames.length;
+
+    if (which === 'AY') {
+      ayFingerprint = avg;
+      calibStatus.textContent = 'AY‑OH! captured! ✓';
+      setTimeout(() => beginRecording('EH'), 1000);
+    } else {
+      ehFingerprint = avg;
+      calibState = 'DONE';
+      calibStep.textContent = '✓ Ready!';
+      calibStep.className = 'done';
+      calibStatus.textContent = 'Voice calibrated — let\'s rock!';
+      calibHint.textContent = '';
+      setTimeout(() => {
+        calibOverlay.classList.add('hidden');
+        overlay.classList.remove('hidden');
+        const startHint = document.getElementById('startHint');
+        if (startHint) startHint.innerHTML = 'Tap or press <kbd>SPACE</kbd> to start';
+      }, 1200);
+    }
+  }
+
+  function cosineSimilarity(a, b) {
+    let dot = 0, normA = 0, normB = 0;
+    for (let i = 0; i < a.length; i++) {
+      dot += a[i] * b[i];
+      normA += a[i] * a[i];
+      normB += b[i] * b[i];
+    }
+    const denom = Math.sqrt(normA) * Math.sqrt(normB);
+    return denom > 0 ? dot / denom : 0;
+  }
+
+  function getSpectrum() {
+    voiceAnalyser.getByteFrequencyData(voiceFreqArray);
+    // Normalize to 0-1
+    const spectrum = new Float32Array(voiceFreqArray.length);
+    for (let i = 0; i < voiceFreqArray.length; i++) {
+      spectrum[i] = voiceFreqArray[i] / 255;
+    }
+    return spectrum;
+  }
+
+  // ─── Voice Processing Loop ─────────────────────────────────
+  function processVoice() {
+    if (!voiceControlActive) { _voiceLoopRunning = false; return; }
+    requestAnimationFrame(processVoice);
+
+    voiceAnalyser.getFloatTimeDomainData(voiceDataArray);
+    const bufLen = voiceDataArray.length;
+
+    // RMS volume
+    let rms = 0;
+    for (let i = 0; i < bufLen; i++) {
+      rms += voiceDataArray[i] * voiceDataArray[i];
+    }
+    rms = Math.sqrt(rms / bufLen);
+    voiceVolume = rms;
+
+    // Update volume meters
+    const meterFill = document.getElementById('voiceMeterFill');
+    const meterPct = Math.min(rms / 0.15, 1) * 100;
+    meterFill.style.width = meterPct + '%';
+    meterFill.classList.toggle('loud', rms >= VOICE_VOLUME_THRESHOLD);
+    calibMeterFill.style.width = meterPct + '%';
+
+    // ── Calibration mode ──
+    if (calibState === 'RECORD_AY' || calibState === 'RECORD_EH') {
+      calibMeterFill.classList.toggle('recording', rms >= VOICE_VOLUME_THRESHOLD);
+      // Always show live RMS on calibration screen
+      calibHint.textContent = 'Volume: ' + (rms * 1000).toFixed(1) + ' — sing into your mic!';
+      if (rms >= VOICE_VOLUME_THRESHOLD) {
+        const spectrum = getSpectrum();
+        calibFrames.push(spectrum);
+        calibFrameCount++;
+        const progress = Math.round((calibFrameCount / CALIB_RECORD_FRAMES) * 100);
+        calibStatus.textContent = 'Recording… ' + progress + '%';
+        if (calibFrameCount >= CALIB_RECORD_FRAMES) {
+          finishRecording(calibState === 'RECORD_AY' ? 'AY' : 'EH');
+        }
+      }
+      return;
+    }
+
+    // ── Gameplay mode — needs calibration data ──
+    if (!ayFingerprint || !ehFingerprint) {
+      voiceCommand = 'NONE';
+      return;
+    }
+
+    if (rms < VOICE_VOLUME_THRESHOLD) {
+      voiceCommand = 'NONE';
+      voiceIndicator.childNodes[0].textContent = '🎤 Sing! ';
+      voiceIndicator.classList.remove('voice-up', 'voice-down');
+      voiceFlash.className = '';
+      return;
+    }
+
+    // Compare live spectrum against calibrated fingerprints
+    const spectrum = getSpectrum();
+    const aySim = cosineSimilarity(spectrum, ayFingerprint);
+    const ehSim = cosineSimilarity(spectrum, ehFingerprint);
+
+    if (aySim > ehSim) {
+      voiceCommand = 'UP';
+      const conf = Math.round(aySim * 100);
+      voiceIndicator.childNodes[0].textContent = '🎤 AY‑OH! ⬆ ' + conf + '% ';
+      voiceIndicator.classList.add('voice-up');
+      voiceIndicator.classList.remove('voice-down');
+      voiceFlash.textContent = 'AY‑OH! ⬆';
+      voiceFlash.className = 'show-up';
+    } else {
+      voiceCommand = 'DOWN';
+      const conf = Math.round(ehSim * 100);
+      voiceIndicator.childNodes[0].textContent = '🎤 EH‑OH! ⬇ ' + conf + '% ';
+      voiceIndicator.classList.add('voice-down');
+      voiceIndicator.classList.remove('voice-up');
+      voiceFlash.textContent = 'EH‑OH! ⬇';
+      voiceFlash.className = 'show-down';
+    }
+  }
+
   function updatePaddles(dt) {
     const minY = -FIELD_H / 2 + PADDLE_H / 2 + WALL_THICKNESS;
     const maxY = FIELD_H / 2 - PADDLE_H / 2 - WALL_THICKNESS;
 
-    // Player 1 (left paddle)
-    if (useKeyboardFallback) {
-      // P1: W/S keys
-      if (keysDown['KeyW']) {
-        p1Paddle.position.y += PADDLE_SPEED * dt;
-      } else if (keysDown['KeyS']) {
-        p1Paddle.position.y -= PADDLE_SPEED * dt;
-      } else {
-        p1Paddle.position.y -= PADDLE_SPEED * 0.5 * dt;
-      }
-      // P2: Arrow keys
-      if (keysDown['ArrowUp']) {
-        p2Paddle.position.y += PADDLE_SPEED * dt;
-      } else if (keysDown['ArrowDown']) {
-        p2Paddle.position.y -= PADDLE_SPEED * dt;
-      } else {
-        p2Paddle.position.y -= PADDLE_SPEED * 0.5 * dt;
-      }
-    } else if (numFacesDetected >= 1) {
-      // Face-controlled P1
-      if (p1EyebrowUp) {
-        p1Paddle.position.y += PADDLE_SPEED * dt;
-      } else {
-        p1Paddle.position.y -= PADDLE_SPEED * 0.5 * dt;
-      }
+    // P1: Voice control + W/S keys
+    const p1VoiceUp = voiceControlActive && voiceCommand === 'UP';
+    const p1VoiceDown = voiceControlActive && voiceCommand === 'DOWN';
 
-      if (numFacesDetected >= 2) {
-        // Face-controlled P2
-        if (p2EyebrowUp) {
-          p2Paddle.position.y += PADDLE_SPEED * dt;
-        } else {
-          p2Paddle.position.y -= PADDLE_SPEED * 0.5 * dt;
-        }
-      } else {
-        // AI for P2
-        aiUpdatePaddle(p2Paddle, dt);
-      }
+    if (keysDown['KeyW'] || p1VoiceUp) {
+      p1Paddle.position.y += PADDLE_SPEED * dt;
+    } else if (keysDown['KeyS'] || p1VoiceDown) {
+      p1Paddle.position.y -= PADDLE_SPEED * dt;
+    }
+
+    // P2: Arrow keys or AI
+    if (keysDown['ArrowUp']) {
+      p2Paddle.position.y += PADDLE_SPEED * dt;
+    } else if (keysDown['ArrowDown']) {
+      p2Paddle.position.y -= PADDLE_SPEED * dt;
     } else {
-      // No faces — both drift down
-      p1Paddle.position.y -= PADDLE_SPEED * 0.3 * dt;
-      p2Paddle.position.y -= PADDLE_SPEED * 0.3 * dt;
+      aiUpdatePaddle(p2Paddle, dt);
     }
 
     // Clamp
@@ -875,6 +966,7 @@
   }
 
   function startGame() {
+    if (!voiceControlActive || !ayFingerprint || !ehFingerprint) return;
     gameState = 'PLAYING';
     p1Score = 0;
     p2Score = 0;
@@ -894,13 +986,7 @@
 
   function endGame(winner) {
     gameState = 'GAME_OVER';
-    const isAI = numFacesDetected < 2 && !useKeyboardFallback;
-    let winnerLabel;
-    if (isAI) {
-      winnerLabel = winner === 1 ? 'You Win! \uD83C\uDF89' : 'AI Wins!';
-    } else {
-      winnerLabel = 'Player ' + winner + ' Wins! \uD83C\uDF89';
-    }
+    const winnerLabel = winner === 1 ? 'You Win! \uD83C\uDF89' : 'AI Wins!';
     gameOverTitle.textContent = winnerLabel;
     gameOverTitle.className = winner === 1 ? 'p1-win' : 'p2-win';
     finalScoreEl.textContent = p1Score + ' \u2014 ' + p2Score;
@@ -961,12 +1047,6 @@
 
     const dt = clock.getDelta();
 
-    // Smooth face tracking for parallax
-    const targetX = numFacesDetected > 0 ? rawFaceX : 0;
-    const targetY = numFacesDetected > 0 ? rawFaceY : 0;
-    smoothFaceX += (targetX - smoothFaceX) * FACE_SMOOTH;
-    smoothFaceY += (targetY - smoothFaceY) * FACE_SMOOTH;
-
     // Update paddles
     if (gameState === 'PLAYING' || gameState === 'SCORED' || gameState === 'WAITING') {
       updatePaddles(dt);
@@ -987,26 +1067,31 @@
     // Particles
     updateParticles(dt);
 
-    // Camera parallax + shake
+    // Camera shake
     const shakeX = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
     const shakeY = screenShake > 0 ? (Math.random() - 0.5) * screenShake : 0;
     screenShake *= 0.9;
     if (screenShake < 0.001) screenShake = 0;
 
     camera.position.set(
-      CAM_BASE.x + smoothFaceX * PARALLAX_X + shakeX,
-      CAM_BASE.y + smoothFaceY * PARALLAX_Y + shakeY,
+      CAM_BASE.x + shakeX,
+      CAM_BASE.y + shakeY,
       CAM_BASE.z
     );
-    camera.lookAt(
-      CAM_LOOKAT.x + smoothFaceX * PARALLAX_X * 0.15,
-      CAM_LOOKAT.y + smoothFaceY * PARALLAX_Y * 0.15,
-      CAM_LOOKAT.z
-    );
+    camera.lookAt(CAM_LOOKAT);
 
-    // Paddle glow pulse
+    // Paddle glow pulse (boost P1 when voice-controlled)
     const t = clock.elapsedTime;
-    p1GlowMat.opacity = 0.08 + Math.sin(t * 3) * 0.04;
+    if (voiceControlActive && voiceCommand === 'UP') {
+      p1GlowMat.color.setHex(0x3fb950);
+      p1GlowMat.opacity = 0.25 + Math.sin(t * 8) * 0.1;
+    } else if (voiceControlActive && voiceCommand === 'DOWN') {
+      p1GlowMat.color.setHex(0xf85149);
+      p1GlowMat.opacity = 0.25 + Math.sin(t * 8) * 0.1;
+    } else {
+      p1GlowMat.color.setHex(P1_COLOR);
+      p1GlowMat.opacity = 0.08 + Math.sin(t * 3) * 0.04;
+    }
     p2GlowMat.opacity = 0.08 + Math.sin(t * 3 + 1) * 0.04;
 
     // Ball glow pulse
@@ -1036,7 +1121,7 @@
 
   // ─── Init ──────────────────────────────────────────────────
   updateScoreDisplay();
-  initFaceTracking();
+  initVoiceControl();
   update();
 
 })();
